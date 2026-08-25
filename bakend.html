@@ -1,0 +1,3512 @@
+<meta name='viewport' content='width=device-width, initial-scale=1'/>const express = require("express");
+const cors = require("cors");
+const dotenv = require("dotenv");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
+const multer = require("multer");
+const Database = require("better-sqlite3");
+
+const fs = require("fs");
+const path = require("path");
+
+dotenv.config();
+
+const app = express();
+
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET =
+  process.env.JWT_SECRET || "CHANGE_THIS_SECRET";
+
+
+/* =====================================================
+   FOLDERS
+===================================================== */
+
+const DATA_DIR = path.join(__dirname, "data");
+
+const UPLOAD_DIR = path.join(__dirname, "uploads");
+
+const ITEM_DIR = path.join(UPLOAD_DIR, "items");
+const STORE_DIR = path.join(UPLOAD_DIR, "stores");
+const PAYMENT_DIR = path.join(UPLOAD_DIR, "payments");
+const RENT_DIR = path.join(UPLOAD_DIR, "rent");
+
+[
+  DATA_DIR,
+  UPLOAD_DIR,
+  ITEM_DIR,
+  STORE_DIR,
+  PAYMENT_DIR,
+  RENT_DIR
+].forEach(dir => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+});
+
+
+/* =====================================================
+   APP
+===================================================== */
+
+app.use(cors());
+
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+app.use(
+  "/uploads",
+  express.static(UPLOAD_DIR)
+);
+
+
+/* =====================================================
+   DATABASE
+===================================================== */
+
+const db = new Database(
+  path.join(DATA_DIR, "localstore.db")
+);
+
+db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
+
+
+/* =====================================================
+   DATABASE TABLES
+===================================================== */
+
+db.exec(`
+
+CREATE TABLE IF NOT EXISTS customers (
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    mobile TEXT UNIQUE NOT NULL,
+
+    name TEXT NOT NULL,
+
+    pin_hash TEXT NOT NULL,
+
+    blocked INTEGER DEFAULT 0,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+
+);
+
+
+CREATE TABLE IF NOT EXISTS stores (
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    store_id TEXT UNIQUE NOT NULL,
+
+    store_name TEXT NOT NULL,
+
+    owner_name TEXT,
+
+    mobile TEXT UNIQUE NOT NULL,
+
+    password_hash TEXT NOT NULL,
+
+    email TEXT,
+
+    upi_id TEXT,
+
+    logo TEXT,
+
+    status TEXT DEFAULT 'ON',
+
+    approved INTEGER DEFAULT 0,
+
+    blocked INTEGER DEFAULT 0,
+
+    expiry_date TEXT,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+
+);
+
+
+CREATE TABLE IF NOT EXISTS items (
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    store_id INTEGER NOT NULL,
+
+    name TEXT NOT NULL,
+
+    price REAL NOT NULL DEFAULT 0,
+
+    stock REAL NOT NULL DEFAULT 0,
+
+    unit TEXT DEFAULT 'piece',
+
+    image TEXT,
+
+    active INTEGER DEFAULT 1,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY(store_id)
+    REFERENCES stores(id)
+    ON DELETE CASCADE
+
+);
+
+
+CREATE TABLE IF NOT EXISTS orders (
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    order_no TEXT UNIQUE NOT NULL,
+
+    customer_id INTEGER NOT NULL,
+
+    store_id INTEGER NOT NULL,
+
+    payment_method TEXT NOT NULL,
+
+    payment_status TEXT DEFAULT 'PENDING',
+
+    status TEXT DEFAULT 'PENDING',
+
+    total REAL NOT NULL DEFAULT 0,
+
+    delivery_time TEXT,
+
+    cancel_reason TEXT,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY(customer_id)
+    REFERENCES customers(id),
+
+    FOREIGN KEY(store_id)
+    REFERENCES stores(id)
+
+);
+
+
+CREATE TABLE IF NOT EXISTS order_items (
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    order_id INTEGER NOT NULL,
+
+    item_id INTEGER,
+
+    name TEXT NOT NULL,
+
+    price REAL NOT NULL,
+
+    quantity REAL NOT NULL,
+
+    unit TEXT,
+
+    FOREIGN KEY(order_id)
+    REFERENCES orders(id)
+    ON DELETE CASCADE
+
+);
+
+
+CREATE TABLE IF NOT EXISTS payments (
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    order_no TEXT,
+
+    customer_id INTEGER,
+
+    store_id INTEGER,
+
+    method TEXT,
+
+    amount REAL,
+
+    transaction_id TEXT,
+
+    screenshot TEXT,
+
+    status TEXT DEFAULT 'PENDING',
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+
+);
+
+
+CREATE TABLE IF NOT EXISTS expenses (
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    store_id INTEGER NOT NULL,
+
+    title TEXT,
+
+    amount REAL DEFAULT 0,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY(store_id)
+    REFERENCES stores(id)
+    ON DELETE CASCADE
+
+);
+
+
+CREATE TABLE IF NOT EXISTS khata (
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    store_id INTEGER NOT NULL,
+
+    customer_id INTEGER NOT NULL,
+
+    total_due REAL DEFAULT 0,
+
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    UNIQUE(store_id, customer_id),
+
+    FOREIGN KEY(store_id)
+    REFERENCES stores(id)
+    ON DELETE CASCADE,
+
+    FOREIGN KEY(customer_id)
+    REFERENCES customers(id)
+    ON DELETE CASCADE
+
+);
+
+
+CREATE TABLE IF NOT EXISTS khata_entries (
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    khata_id INTEGER NOT NULL,
+
+    type TEXT NOT NULL,
+
+    amount REAL NOT NULL,
+
+    note TEXT,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY(khata_id)
+    REFERENCES khata(id)
+    ON DELETE CASCADE
+
+);
+
+
+CREATE TABLE IF NOT EXISTS rent_payments (
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    store_id INTEGER NOT NULL,
+
+    amount REAL NOT NULL,
+
+    screenshot TEXT,
+
+    status TEXT DEFAULT 'PENDING',
+
+    expiry_date TEXT,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY(store_id)
+    REFERENCES stores(id)
+    ON DELETE CASCADE
+
+);
+
+
+CREATE TABLE IF NOT EXISTS admins (
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    mobile TEXT UNIQUE NOT NULL,
+
+    password_hash TEXT NOT NULL,
+
+    name TEXT,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+
+);
+
+`);
+
+
+/* =====================================================
+   DEFAULT ADMIN
+===================================================== */
+
+const adminMobile =
+  process.env.ADMIN_MOBILE || "9999999999";
+
+const adminPassword =
+  process.env.ADMIN_PASSWORD || "CHANGE_ADMIN_PASSWORD";
+
+const adminName =
+  process.env.ADMIN_NAME || "Local Store Admin";
+
+const existingAdmin =
+  db.prepare(
+    "SELECT id FROM admins WHERE mobile = ?"
+  ).get(adminMobile);
+
+if (!existingAdmin) {
+
+  const hash =
+    bcrypt.hashSync(adminPassword, 12);
+
+  db.prepare(`
+    INSERT INTO admins
+    (mobile, password_hash, name)
+    VALUES (?, ?, ?)
+  `).run(
+    adminMobile,
+    hash,
+    adminName
+  );
+
+  console.log("Default admin created.");
+
+}
+
+
+/* =====================================================
+   MULTER
+===================================================== */
+
+const storage = multer.diskStorage({
+
+  destination: function(req, file, cb) {
+
+    const type = req.query.type || "items";
+
+    let dir = ITEM_DIR;
+
+    if (type === "store")
+      dir = STORE_DIR;
+
+    if (type === "payment")
+      dir = PAYMENT_DIR;
+
+    if (type === "rent")
+      dir = RENT_DIR;
+
+    cb(null, dir);
+  },
+
+  filename: function(req, file, cb) {
+
+    const ext =
+      path.extname(file.originalname);
+
+    const name =
+      Date.now() +
+      "-" +
+      Math.random()
+        .toString(36)
+        .substring(2, 9) +
+      ext;
+
+    cb(null, name);
+
+  }
+
+});
+
+const upload =
+  multer({
+    storage,
+
+    limits: {
+      fileSize: 8 * 1024 * 1024
+    }
+  });
+
+
+/* =====================================================
+   HELPERS
+===================================================== */
+
+function createToken(user) {
+
+  return jwt.sign(
+    {
+      id: user.id,
+      role: user.role,
+      mobile: user.mobile
+    },
+
+    JWT_SECRET,
+
+    {
+      expiresIn: "30d"
+    }
+  );
+
+}
+
+
+function auth(...roles) {
+
+  return function(req, res, next) {
+
+    try {
+
+      const header =
+        req.headers.authorization;
+
+      if (!header) {
+
+        return res.status(401).json({
+          message: "Authorization required"
+        });
+
+      }
+
+      const token =
+        header.startsWith("Bearer ")
+          ? header.substring(7)
+          : header;
+
+      const decoded =
+        jwt.verify(token, JWT_SECRET);
+
+      if (
+        roles.length &&
+        !roles.includes(decoded.role)
+      ) {
+
+        return res.status(403).json({
+          message: "Access denied"
+        });
+
+      }
+
+      req.user = decoded;
+
+      next();
+
+    } catch (error) {
+
+      return res.status(401).json({
+        message: "Invalid or expired token"
+      });
+
+    }
+
+  };
+
+}
+
+
+function generateOrderNo() {
+
+  return (
+    "LS" +
+    Date.now() +
+    Math.floor(
+      Math.random() * 1000
+    )
+  );
+
+}
+
+
+function number(value) {
+
+  const n = Number(value);
+
+  return Number.isFinite(n) ? n : 0;
+
+}
+
+
+/* =====================================================
+   HOME
+===================================================== */
+
+app.get("/", (req, res) => {
+
+  res.json({
+
+    app: "Local Store Backend",
+
+    version: "2.0.0",
+
+    status: "running",
+
+    apps: [
+      "Customer",
+      "Store",
+      "Admin"
+    ]
+
+  });
+
+});
+
+
+/* =====================================================
+   CUSTOMER REGISTER
+===================================================== */
+
+app.post(
+  "/api/customer/register",
+  async (req, res) => {
+
+    try {
+
+      const {
+        mobile,
+        name,
+        pin
+      } = req.body;
+
+      if (!mobile || !name || !pin) {
+
+        return res.status(400).json({
+          message:
+            "Mobile, name and PIN are required"
+        });
+
+      }
+
+      const exists =
+        db.prepare(
+          "SELECT id FROM customers WHERE mobile = ?"
+        ).get(mobile);
+
+      if (exists) {
+
+        return res.status(409).json({
+          message:
+            "Customer already registered"
+        });
+
+      }
+
+      const pinHash =
+        await bcrypt.hash(
+          String(pin),
+          12
+        );
+
+      const result =
+        db.prepare(`
+          INSERT INTO customers
+          (mobile, name, pin_hash)
+          VALUES (?, ?, ?)
+        `).run(
+          mobile,
+          name,
+          pinHash
+        );
+
+      const customer =
+        db.prepare(`
+          SELECT
+          id,
+          mobile,
+          name,
+          blocked,
+          created_at
+          FROM customers
+          WHERE id = ?
+        `).get(result.lastInsertRowid);
+
+      const token =
+        createToken({
+          id: customer.id,
+          role: "customer",
+          mobile: customer.mobile
+        });
+
+      res.status(201).json({
+        message: "Registration successful",
+        token,
+        customer
+      });
+
+    } catch (error) {
+
+      console.error(error);
+
+      res.status(500).json({
+        message: "Customer registration failed"
+      });
+
+    }
+
+  }
+);
+
+
+/* =====================================================
+   CUSTOMER LOGIN
+===================================================== */
+
+app.post(
+  "/api/customer/login",
+  async (req, res) => {
+
+    try {
+
+      const {
+        mobile,
+        pin
+      } = req.body;
+
+      const customer =
+        db.prepare(
+          "SELECT * FROM customers WHERE mobile = ?"
+        ).get(mobile);
+
+      if (!customer) {
+
+        return res.status(401).json({
+          message: "Invalid mobile or PIN"
+        });
+
+      }
+
+      if (customer.blocked) {
+
+        return res.status(403).json({
+          message: "Customer account blocked"
+        });
+
+      }
+
+      const valid =
+        await bcrypt.compare(
+          String(pin),
+          customer.pin_hash
+        );
+
+      if (!valid) {
+
+        return res.status(401).json({
+          message: "Invalid mobile or PIN"
+        });
+
+      }
+
+      const token =
+        createToken({
+          id: customer.id,
+          role: "customer",
+          mobile: customer.mobile
+        });
+
+      res.json({
+
+        message: "Login successful",
+
+        token,
+
+        customer: {
+          id: customer.id,
+          mobile: customer.mobile,
+          name: customer.name
+        }
+
+      });
+
+    } catch (error) {
+
+      res.status(500).json({
+        message: "Login failed"
+      });
+
+    }
+
+  }
+);
+
+
+/* =====================================================
+   CUSTOMER PROFILE
+===================================================== */
+
+app.get(
+  "/api/customer/profile",
+  auth("customer"),
+  (req, res) => {
+
+    const customer =
+      db.prepare(`
+        SELECT
+        id,
+        mobile,
+        name,
+        blocked,
+        created_at
+        FROM customers
+        WHERE id = ?
+      `).get(req.user.id);
+
+    res.json({
+      customer
+    });
+
+  }
+);
+
+
+/* =====================================================
+   STORE REGISTER
+===================================================== */
+
+app.post(
+  "/api/store/register",
+  async (req, res) => {
+
+    try {
+
+      const {
+        store_id,
+        store_name,
+        owner_name,
+        mobile,
+        password,
+        email,
+        upi_id
+      } = req.body;
+
+      if (
+        !store_id ||
+        !store_name ||
+        !mobile ||
+        !password
+      ) {
+
+        return res.status(400).json({
+          message:
+            "Store ID, store name, mobile and password are required"
+        });
+
+      }
+
+      const exists =
+        db.prepare(`
+          SELECT id
+          FROM stores
+          WHERE store_id = ?
+             OR mobile = ?
+        `).get(
+          store_id,
+          mobile
+        );
+
+      if (exists) {
+
+        return res.status(409).json({
+          message:
+            "Store ID or mobile already exists"
+        });
+
+      }
+
+      const passwordHash =
+        await bcrypt.hash(
+          String(password),
+          12
+        );
+
+      const result =
+        db.prepare(`
+          INSERT INTO stores
+          (
+            store_id,
+            store_name,
+            owner_name,
+            mobile,
+            password_hash,
+            email,
+            upi_id
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          store_id,
+          store_name,
+          owner_name || "",
+          mobile,
+          passwordHash,
+          email || "",
+          upi_id || ""
+        );
+
+      const store =
+        db.prepare(`
+          SELECT
+          id,
+          store_id,
+          store_name,
+          owner_name,
+          mobile,
+          email,
+          upi_id,
+          status,
+          approved,
+          blocked,
+          expiry_date,
+          created_at
+          FROM stores
+          WHERE id = ?
+        `).get(result.lastInsertRowid);
+
+      res.status(201).json({
+
+        message:
+          "Store registration successful",
+
+        login_allowed:
+          true,
+
+        approved:
+          Boolean(store.approved),
+
+        store
+
+      });
+
+    } catch (error) {
+
+      console.error(error);
+
+      res.status(500).json({
+        message: "Store registration failed"
+      });
+
+    }
+
+  }
+);
+
+
+/* =====================================================
+   STORE LOGIN
+   IMPORTANT:
+   ADMIN APPROVAL NOT REQUIRED FOR LOGIN
+===================================================== */
+
+app.post(
+  "/api/store/login",
+  async (req, res) => {
+
+    try {
+
+      const {
+        store_id,
+        password
+      } = req.body;
+
+      const store =
+        db.prepare(`
+          SELECT *
+          FROM stores
+          WHERE store_id = ?
+        `).get(store_id);
+
+      if (!store) {
+
+        return res.status(401).json({
+          message:
+            "Invalid Store ID or password"
+        });
+
+      }
+
+      if (store.blocked) {
+
+        return res.status(403).json({
+          message:
+            "Store has been blocked by Admin"
+        });
+
+      }
+
+      /*
+        IMPORTANT:
+        approved check କରାଯାଇନାହିଁ।
+        ତେଣୁ Admin approve ନ କଲେ ମଧ୍ୟ
+        Store login କରିପାରିବ।
+      */
+
+      const valid =
+        await bcrypt.compare(
+          String(password),
+          store.password_hash
+        );
+
+      if (!valid) {
+
+        return res.status(401).json({
+          message:
+            "Invalid Store ID or password"
+        });
+
+      }
+
+      const token =
+        createToken({
+          id: store.id,
+          role: "store",
+          mobile: store.mobile
+        });
+
+      res.json({
+
+        message:
+          "Store login successful",
+
+        token,
+
+        store: {
+          id: store.id,
+          store_id: store.store_id,
+          store_name: store.store_name,
+          owner_name: store.owner_name,
+          mobile: store.mobile,
+          email: store.email,
+          upi_id: store.upi_id,
+          logo: store.logo,
+          status: store.status,
+          approved: Boolean(store.approved),
+          expiry_date: store.expiry_date
+        }
+
+      });
+
+    } catch (error) {
+
+      console.error(error);
+
+      res.status(500).json({
+        message: "Store login failed"
+      });
+
+    }
+
+  }
+);
+
+
+/* =====================================================
+   STORE PROFILE
+===================================================== */
+
+app.get(
+  "/api/store/profile",
+  auth("store"),
+  (req, res) => {
+
+    const store =
+      db.prepare(`
+        SELECT
+        id,
+        store_id,
+        store_name,
+        owner_name,
+        mobile,
+        email,
+        upi_id,
+        logo,
+        status,
+        approved,
+        blocked,
+        expiry_date,
+        created_at
+        FROM stores
+        WHERE id = ?
+      `).get(req.user.id);
+
+    res.json({
+      store
+    });
+
+  }
+);
+
+
+/* =====================================================
+   UPDATE STORE PROFILE
+===================================================== */
+
+app.put(
+  "/api/store/profile",
+  auth("store"),
+  (req, res) => {
+
+    const {
+      store_name,
+      owner_name,
+      email,
+      upi_id
+    } = req.body;
+
+    db.prepare(`
+      UPDATE stores
+
+      SET
+        store_name = COALESCE(?, store_name),
+        owner_name = COALESCE(?, owner_name),
+        email = COALESCE(?, email),
+        upi_id = COALESCE(?, upi_id)
+
+      WHERE id = ?
+
+    `).run(
+      store_name,
+      owner_name,
+      email,
+      upi_id,
+      req.user.id
+    );
+
+    res.json({
+      message:
+        "Store profile updated"
+    });
+
+  }
+);
+
+
+/* =====================================================
+   STORE STATUS
+===================================================== */
+
+app.put(
+  "/api/store/status",
+  auth("store"),
+  (req, res) => {
+
+    const status =
+      req.body.status === "OFF"
+        ? "OFF"
+        : "ON";
+
+    db.prepare(`
+      UPDATE stores
+      SET status = ?
+      WHERE id = ?
+    `).run(
+      status,
+      req.user.id
+    );
+
+    res.json({
+      message: "Store status updated",
+      status
+    });
+
+  }
+);
+
+
+/* =====================================================
+   ADD ITEM
+===================================================== */
+
+app.post(
+  "/api/store/item",
+  auth("store"),
+  upload.single("image"),
+  (req, res) => {
+
+    try {
+
+      const {
+        name,
+        price,
+        stock,
+        unit
+      } = req.body;
+
+      if (!name) {
+
+        return res.status(400).json({
+          message:
+            "Item name required"
+        });
+
+      }
+
+      let image = null;
+
+      if (req.file) {
+
+        image =
+          `/uploads/items/${req.file.filename}`;
+
+      }
+
+      const result =
+        db.prepare(`
+          INSERT INTO items
+          (
+            store_id,
+            name,
+            price,
+            stock,
+            unit,
+            image
+          )
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(
+          req.user.id,
+          name,
+          number(price),
+          number(stock),
+          unit || "piece",
+          image
+        );
+
+      const item =
+        db.prepare(
+          "SELECT * FROM items WHERE id = ?"
+        ).get(result.lastInsertRowid);
+
+      res.status(201).json({
+        message: "Item added",
+        item
+      });
+
+    } catch (error) {
+
+      console.error(error);
+
+      res.status(500).json({
+        message: "Item creation failed"
+      });
+
+    }
+
+  }
+);
+
+
+/* =====================================================
+   STORE ITEMS
+===================================================== */
+
+app.get(
+  "/api/store/items",
+  auth("store"),
+  (req, res) => {
+
+    const items =
+      db.prepare(`
+        SELECT *
+        FROM items
+        WHERE store_id = ?
+        ORDER BY id DESC
+      `).all(req.user.id);
+
+    res.json({
+      items
+    });
+
+  }
+);
+
+
+/* =====================================================
+   CUSTOMER STORE SEARCH
+===================================================== */
+
+app.get(
+  "/api/store/search/:storeId",
+  auth("customer"),
+  (req, res) => {
+
+    const store =
+      db.prepare(`
+        SELECT
+        id,
+        store_id,
+        store_name,
+        owner_name,
+        mobile,
+        email,
+        upi_id,
+        logo,
+        status
+        FROM stores
+        WHERE store_id = ?
+          AND blocked = 0
+      `).get(req.params.storeId);
+
+    if (!store) {
+
+      return res.status(404).json({
+        message: "Store not found"
+      });
+
+    }
+
+    const items =
+      db.prepare(`
+        SELECT
+        id,
+        name,
+        price,
+        stock,
+        unit,
+        image
+        FROM items
+        WHERE store_id = ?
+          AND active = 1
+      `).all(store.id);
+
+    res.json({
+      store,
+      items
+    });
+
+  }
+);
+
+
+/* =====================================================
+   CUSTOMER GET STORE ITEMS
+===================================================== */
+
+app.get(
+  "/api/store/:storeId/items",
+  auth("customer"),
+  (req, res) => {
+
+    const store =
+      db.prepare(`
+        SELECT id
+        FROM stores
+        WHERE store_id = ?
+          AND blocked = 0
+      `).get(req.params.storeId);
+
+    if (!store) {
+
+      return res.status(404).json({
+        message: "Store not found"
+      });
+
+    }
+
+    const items =
+      db.prepare(`
+        SELECT
+        id,
+        name,
+        price,
+        stock,
+        unit,
+        image
+        FROM items
+        WHERE store_id = ?
+          AND active = 1
+      `).all(store.id);
+
+    res.json({
+      items
+    });
+
+  }
+);
+
+
+/* =====================================================
+   UPDATE ITEM
+===================================================== */
+
+app.put(
+  "/api/store/item/:id",
+  auth("store"),
+  (req, res) => {
+
+    const item =
+      db.prepare(`
+        SELECT *
+        FROM items
+        WHERE id = ?
+          AND store_id = ?
+      `).get(
+        req.params.id,
+        req.user.id
+      );
+
+    if (!item) {
+
+      return res.status(404).json({
+        message: "Item not found"
+      });
+
+    }
+
+    const {
+      name,
+      price,
+      stock,
+      unit,
+      active
+    } = req.body;
+
+    db.prepare(`
+      UPDATE items
+
+      SET
+        name = COALESCE(?, name),
+        price = COALESCE(?, price),
+        stock = COALESCE(?, stock),
+        unit = COALESCE(?, unit),
+        active = COALESCE(?, active)
+
+      WHERE id = ?
+
+    `).run(
+      name,
+      price !== undefined
+        ? number(price)
+        : null,
+
+      stock !== undefined
+        ? number(stock)
+        : null,
+
+      unit,
+
+      active !== undefined
+        ? Number(active)
+        : null,
+
+      item.id
+    );
+
+    res.json({
+      message: "Item updated"
+    });
+
+  }
+);
+
+
+/* =====================================================
+   DELETE ITEM
+===================================================== */
+
+app.delete(
+  "/api/store/item/:id",
+  auth("store"),
+  (req, res) => {
+
+    db.prepare(`
+      DELETE FROM items
+      WHERE id = ?
+        AND store_id = ?
+    `).run(
+      req.params.id,
+      req.user.id
+    );
+
+    res.json({
+      message: "Item deleted"
+    });
+
+  }
+);
+
+
+/* =====================================================
+   CREATE ORDER
+===================================================== */
+
+app.post(
+  "/api/order/create",
+  auth("customer"),
+  (req, res) => {
+
+    const {
+      store_id,
+      payment_method,
+      items
+    } = req.body;
+
+    if (
+      !store_id ||
+      !Array.isArray(items) ||
+      !items.length
+    ) {
+
+      return res.status(400).json({
+        message:
+          "Store and items required"
+      });
+
+    }
+
+    const store =
+      db.prepare(`
+        SELECT *
+        FROM stores
+        WHERE store_id = ?
+          AND blocked = 0
+      `).get(store_id);
+
+    if (!store) {
+
+      return res.status(404).json({
+        message: "Store not found"
+      });
+
+    }
+
+
+    const transaction =
+      db.transaction(() => {
+
+        let total = 0;
+
+        const orderItems = [];
+
+
+        for (const cartItem of items) {
+
+          const item =
+            db.prepare(`
+              SELECT *
+              FROM items
+              WHERE id = ?
+                AND store_id = ?
+                AND active = 1
+            `).get(
+              cartItem.item_id,
+              store.id
+            );
+
+          if (!item) {
+
+            throw new Error(
+              "Item not found: " +
+              cartItem.item_id
+            );
+
+          }
+
+          const qty =
+            number(cartItem.quantity);
+
+          if (qty <= 0) {
+
+            throw new Error(
+              "Invalid quantity"
+            );
+
+          }
+
+          if (item.stock < qty) {
+
+            throw new Error(
+              `${item.name}: insufficient stock`
+            );
+
+          }
+
+          const lineTotal =
+            item.price * qty;
+
+          total += lineTotal;
+
+          orderItems.push({
+            item,
+            qty,
+            lineTotal
+          });
+
+        }
+
+
+        const orderNo =
+          generateOrderNo();
+
+
+        const order =
+          db.prepare(`
+            INSERT INTO orders
+            (
+              order_no,
+              customer_id,
+              store_id,
+              payment_method,
+              total
+            )
+            VALUES (?, ?, ?, ?, ?)
+          `).run(
+            orderNo,
+            req.user.id,
+            store.id,
+            payment_method || "COD",
+            total
+          );
+
+
+        for (const x of orderItems) {
+
+          db.prepare(`
+            INSERT INTO order_items
+            (
+              order_id,
+              item_id,
+              name,
+              price,
+              quantity,
+              unit
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(
+            order.lastInsertRowid,
+            x.item.id,
+            x.item.name,
+            x.item.price,
+            x.qty,
+            x.item.unit
+          );
+
+
+          db.prepare(`
+            UPDATE items
+            SET stock = stock - ?
+            WHERE id = ?
+          `).run(
+            x.qty,
+            x.item.id
+          );
+
+        }
+
+
+        if (
+          payment_method === "COD" ||
+          payment_method === "CASH"
+        ) {
+
+          db.prepare(`
+            UPDATE orders
+            SET payment_status = 'PENDING'
+            WHERE id = ?
+          `).run(
+            order.lastInsertRowid
+          );
+
+        }
+
+
+        return {
+          id: order.lastInsertRowid,
+          orderNo,
+          total
+        };
+
+      });
+
+
+    res.status(201).json({
+
+      message:
+        "Order created successfully",
+
+      order: transaction
+
+    });
+
+  }
+);
+
+
+/* =====================================================
+   STORE ORDERS
+===================================================== */
+
+app.get(
+  "/api/store/orders",
+  auth("store"),
+  (req, res) => {
+
+    const orders =
+      db.prepare(`
+        SELECT
+          o.*,
+          c.name AS customer_name,
+          c.mobile AS customer_mobile
+
+        FROM orders o
+
+        JOIN customers c
+          ON c.id = o.customer_id
+
+        WHERE o.store_id = ?
+
+        ORDER BY o.id DESC
+      `).all(req.user.id);
+
+    res.json({
+      orders
+    });
+
+  }
+);
+
+
+/* =====================================================
+   STORE ORDER DETAILS
+===================================================== */
+
+app.get(
+  "/api/store/order/:orderNo",
+  auth("store"),
+  (req, res) => {
+
+    const order =
+      db.prepare(`
+        SELECT
+          o.*,
+          c.name AS customer_name,
+          c.mobile AS customer_mobile
+
+        FROM orders o
+
+        JOIN customers c
+          ON c.id = o.customer_id
+
+        WHERE o.order_no = ?
+          AND o.store_id = ?
+      `).get(
+        req.params.orderNo,
+        req.user.id
+      );
+
+    if (!order) {
+
+      return res.status(404).json({
+        message: "Order not found"
+      });
+
+    }
+
+    const items =
+      db.prepare(`
+        SELECT *
+        FROM order_items
+        WHERE order_id = ?
+      `).all(order.id);
+
+    res.json({
+      order,
+      items
+    });
+
+  }
+);
+
+
+/* =====================================================
+   APPROVE ORDER
+===================================================== */
+
+app.post(
+  "/api/order/:orderNo/approve",
+  auth("store"),
+  (req, res) => {
+
+    const order =
+      db.prepare(`
+        SELECT *
+        FROM orders
+        WHERE order_no = ?
+          AND store_id = ?
+      `).get(
+        req.params.orderNo,
+        req.user.id
+      );
+
+    if (!order) {
+
+      return res.status(404).json({
+        message: "Order not found"
+      });
+
+    }
+
+    db.prepare(`
+      UPDATE orders
+      SET
+        status = 'CONFIRMED'
+      WHERE id = ?
+    `).run(order.id);
+
+    res.json({
+      message: "Order approved"
+    });
+
+  }
+);
+
+
+/* =====================================================
+   CANCEL ORDER
+===================================================== */
+
+app.post(
+  "/api/order/:orderNo/cancel",
+  auth("store"),
+  (req, res) => {
+
+    const {
+      reason
+    } = req.body;
+
+    const order =
+      db.prepare(`
+        SELECT *
+        FROM orders
+        WHERE order_no = ?
+          AND store_id = ?
+      `).get(
+        req.params.orderNo,
+        req.user.id
+      );
+
+    if (!order) {
+
+      return res.status(404).json({
+        message: "Order not found"
+      });
+
+    }
+
+    db.prepare(`
+      UPDATE orders
+
+      SET
+        status = 'CANCELLED',
+        cancel_reason = ?
+
+      WHERE id = ?
+
+    `).run(
+      reason || "",
+      order.id
+    );
+
+
+    const items =
+      db.prepare(`
+        SELECT *
+        FROM order_items
+        WHERE order_id = ?
+      `).all(order.id);
+
+
+    for (const item of items) {
+
+      db.prepare(`
+        UPDATE items
+        SET stock = stock + ?
+        WHERE id = ?
+      `).run(
+        item.quantity,
+        item.item_id
+      );
+
+    }
+
+
+    res.json({
+      message: "Order cancelled"
+    });
+
+  }
+);
+
+
+/* =====================================================
+   CUSTOMER ORDERS
+===================================================== */
+
+app.get(
+  "/api/customer/orders",
+  auth("customer"),
+  (req, res) => {
+
+    const orders =
+      db.prepare(`
+        SELECT
+          o.*,
+          s.store_name,
+          s.store_id
+
+        FROM orders o
+
+        JOIN stores s
+          ON s.id = o.store_id
+
+        WHERE o.customer_id = ?
+
+        ORDER BY o.id DESC
+      `).all(req.user.id);
+
+    res.json({
+      orders
+    });
+
+  }
+);
+
+
+/* =====================================================
+   CUSTOMER ORDER DETAILS / TRACKING
+===================================================== */
+
+app.get(
+  "/api/customer/order/:orderNo",
+  auth("customer"),
+  (req, res) => {
+
+    const order =
+      db.prepare(`
+        SELECT
+          o.*,
+          s.store_name,
+          s.store_id
+
+        FROM orders o
+
+        JOIN stores s
+          ON s.id = o.store_id
+
+        WHERE
+          o.order_no = ?
+          AND o.customer_id = ?
+
+      `).get(
+        req.params.orderNo,
+        req.user.id
+      );
+
+    if (!order) {
+
+      return res.status(404).json({
+        message: "Order not found"
+      });
+
+    }
+
+    const items =
+      db.prepare(`
+        SELECT *
+        FROM order_items
+        WHERE order_id = ?
+      `).all(order.id);
+
+    res.json({
+      order,
+      items
+    });
+
+  }
+);
+
+
+/* =====================================================
+   PAYMENT UPLOAD
+===================================================== */
+
+app.post(
+  "/api/payment/upload",
+  auth("customer"),
+  upload.single("screenshot"),
+  (req, res) => {
+
+    try {
+
+      const {
+        order_no,
+        transaction_id
+      } = req.body;
+
+      if (!order_no) {
+
+        return res.status(400).json({
+          message:
+            "Order number required"
+        });
+
+      }
+
+      const order =
+        db.prepare(`
+          SELECT *
+          FROM orders
+          WHERE order_no = ?
+            AND customer_id = ?
+        `).get(
+          order_no,
+          req.user.id
+        );
+
+      if (!order) {
+
+        return res.status(404).json({
+          message: "Order not found"
+        });
+
+      }
+
+      let screenshot = null;
+
+      if (req.file) {
+
+        screenshot =
+          `/uploads/payments/${req.file.filename}`;
+
+      }
+
+
+      const result =
+        db.prepare(`
+          INSERT INTO payments
+          (
+            order_no,
+            customer_id,
+            store_id,
+            method,
+            amount,
+            transaction_id,
+            screenshot
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          order.order_no,
+          req.user.id,
+          order.store_id,
+          "UPI",
+          order.total,
+          transaction_id || "",
+          screenshot
+        );
+
+
+      db.prepare(`
+        UPDATE orders
+
+        SET
+          payment_status = 'SUBMITTED'
+
+        WHERE id = ?
+
+      `).run(order.id);
+
+
+      res.status(201).json({
+
+        message:
+          "Payment submitted for verification",
+
+        payment_id:
+          result.lastInsertRowid,
+
+        status:
+          "PENDING"
+
+      });
+
+    } catch (error) {
+
+      console.error(error);
+
+      res.status(500).json({
+        message: "Payment upload failed"
+      });
+
+    }
+
+  }
+);
+
+
+/* =====================================================
+   STORE PAYMENT VERIFY
+===================================================== */
+
+app.post(
+  "/api/store/payment/:id/verify",
+  auth("store"),
+  (req, res) => {
+
+    const {
+      status
+    } = req.body;
+
+    const payment =
+      db.prepare(`
+        SELECT *
+        FROM payments
+        WHERE id = ?
+          AND store_id = ?
+      `).get(
+        req.params.id,
+        req.user.id
+      );
+
+    if (!payment) {
+
+      return res.status(404).json({
+        message: "Payment not found"
+      });
+
+    }
+
+    const newStatus =
+      status === "REJECTED"
+        ? "REJECTED"
+        : "VERIFIED";
+
+
+    db.prepare(`
+      UPDATE payments
+      SET status = ?
+      WHERE id = ?
+    `).run(
+      newStatus,
+      payment.id
+    );
+
+
+    db.prepare(`
+      UPDATE orders
+
+      SET payment_status = ?
+
+      WHERE order_no = ?
+
+    `).run(
+      newStatus,
+      payment.order_no
+    );
+
+
+    res.json({
+      message:
+        "Payment status updated",
+      status:
+        newStatus
+    });
+
+  }
+);
+
+
+/* =====================================================
+   KHATA -- GET CUSTOMER KHATA
+===================================================== */
+
+app.get(
+  "/api/store/khata/:customerId",
+  auth("store"),
+  (req, res) => {
+
+    const customer =
+      db.prepare(`
+        SELECT
+          id,
+          name,
+          mobile
+        FROM customers
+        WHERE id = ?
+      `).get(
+        req.params.customerId
+      );
+
+    if (!customer) {
+
+      return res.status(404).json({
+        message: "Customer not found"
+      });
+
+    }
+
+
+    let khata =
+      db.prepare(`
+        SELECT *
+        FROM khata
+        WHERE store_id = ?
+          AND customer_id = ?
+      `).get(
+        req.user.id,
+        customer.id
+      );
+
+
+    if (!khata) {
+
+      const result =
+        db.prepare(`
+          INSERT INTO khata
+          (
+            store_id,
+            customer_id,
+            total_due
+          )
+          VALUES (?, ?, 0)
+        `).run(
+          req.user.id,
+          customer.id
+        );
+
+      khata =
+        db.prepare(
+          "SELECT * FROM khata WHERE id = ?"
+        ).get(result.lastInsertRowid);
+
+    }
+
+
+    const entries =
+      db.prepare(`
+        SELECT *
+        FROM khata_entries
+        WHERE khata_id = ?
+        ORDER BY id DESC
+      `).all(khata.id);
+
+
+    res.json({
+      customer,
+      khata,
+      entries
+    });
+
+  }
+);
+
+
+/* =====================================================
+   KHATA ADD DUE
+===================================================== */
+
+app.post(
+  "/api/store/khata/:customerId/add",
+  auth("store"),
+  (req, res) => {
+
+    const amount =
+      number(req.body.amount);
+
+    const note =
+      req.body.note || "Credit";
+
+    if (amount <= 0) {
+
+      return res.status(400).json({
+        message: "Invalid amount"
+      });
+
+    }
+
+
+    let khata =
+      db.prepare(`
+        SELECT *
+        FROM khata
+        WHERE store_id = ?
+          AND customer_id = ?
+      `).get(
+        req.user.id,
+        req.params.customerId
+      );
+
+
+    if (!khata) {
+
+      const result =
+        db.prepare(`
+          INSERT INTO khata
+          (
+            store_id,
+            customer_id,
+            total_due
+          )
+          VALUES (?, ?, 0)
+        `).run(
+          req.user.id,
+          req.params.customerId
+        );
+
+      khata =
+        db.prepare(
+          "SELECT * FROM khata WHERE id = ?"
+        ).get(result.lastInsertRowid);
+
+    }
+
+
+    db.prepare(`
+      INSERT INTO khata_entries
+      (
+        khata_id,
+        type,
+        amount,
+        note
+      )
+      VALUES (?, 'DUE', ?, ?)
+    `).run(
+      khata.id,
+      amount,
+      note
+    );
+
+
+    db.prepare(`
+      UPDATE khata
+
+      SET
+        total_due =
+          total_due + ?,
+        updated_at =
+          CURRENT_TIMESTAMP
+
+      WHERE id = ?
+
+    `).run(
+      amount,
+      khata.id
+    );
+
+
+    const updated =
+      db.prepare(
+        "SELECT * FROM khata WHERE id = ?"
+      ).get(khata.id);
+
+
+    res.json({
+      message: "Khata updated",
+      khata: updated
+    });
+
+  }
+);
+
+
+/* =====================================================
+   KHATA PAYMENT
+===================================================== */
+
+app.post(
+  "/api/store/khata/:customerId/payment",
+  auth("store"),
+  (req, res) => {
+
+    const amount =
+      number(req.body.amount);
+
+    const note =
+      req.body.note || "Payment";
+
+    if (amount <= 0) {
+
+      return res.status(400).json({
+        message: "Invalid amount"
+      });
+
+    }
+
+
+    const khata =
+      db.prepare(`
+        SELECT *
+        FROM khata
+        WHERE store_id = ?
+          AND customer_id = ?
+      `).get(
+        req.user.id,
+        req.params.customerId
+      );
+
+
+    if (!khata) {
+
+      return res.status(404).json({
+        message: "Khata not found"
+      });
+
+    }
+
+
+    const paymentAmount =
+      Math.min(
+        amount,
+        khata.total_due
+      );
+
+
+    db.prepare(`
+      INSERT INTO khata_entries
+      (
+        khata_id,
+        type,
+        amount,
+        note
+      )
+      VALUES (?, 'PAYMENT', ?, ?)
+    `).run(
+      khata.id,
+      paymentAmount,
+      note
+    );
+
+
+    db.prepare(`
+      UPDATE khata
+
+      SET
+        total_due =
+          MAX(total_due - ?, 0),
+        updated_at =
+          CURRENT_TIMESTAMP
+
+      WHERE id = ?
+
+    `).run(
+      paymentAmount,
+      khata.id
+    );
+
+
+    const updated =
+      db.prepare(
+        "SELECT * FROM khata WHERE id = ?"
+      ).get(khata.id);
+
+
+    res.json({
+
+      message:
+        "Khata payment recorded",
+
+      paid:
+        paymentAmount,
+
+      khata:
+        updated
+
+    });
+
+  }
+);
+
+
+/* =====================================================
+   CUSTOMER KHATA
+===================================================== */
+
+app.get(
+  "/api/customer/khata",
+  auth("customer"),
+  (req, res) => {
+
+    const list =
+      db.prepare(`
+        SELECT
+
+          k.id,
+          k.total_due,
+          k.updated_at,
+
+          s.id AS store_id,
+          s.store_id AS store_code,
+          s.store_name
+
+        FROM khata k
+
+        JOIN stores s
+          ON s.id = k.store_id
+
+        WHERE
+          k.customer_id = ?
+
+        ORDER BY k.updated_at DESC
+
+      `).all(req.user.id);
+
+
+    res.json({
+      khata: list
+    });
+
+  }
+);
+
+
+/* =====================================================
+   CUSTOMER KHATA PAYMENT RECORD
+===================================================== */
+
+app.post(
+  "/api/customer/khata/:khataId/payment",
+  auth("customer"),
+  (req, res) => {
+
+    const amount =
+      number(req.body.amount);
+
+    if (amount <= 0) {
+
+      return res.status(400).json({
+        message: "Invalid amount"
+      });
+
+    }
+
+
+    const khata =
+      db.prepare(`
+        SELECT
+          k.*,
+          s.store_name
+        FROM khata k
+        JOIN stores s
+          ON s.id = k.store_id
+        WHERE
+          k.id = ?
+          AND k.customer_id = ?
+      `).get(
+        req.params.khataId,
+        req.user.id
+      );
+
+
+    if (!khata) {
+
+      return res.status(404).json({
+        message: "Khata not found"
+      });
+
+    }
+
+
+    if (khata.total_due <= 0) {
+
+      return res.status(400).json({
+        message: "No outstanding balance"
+      });
+
+    }
+
+
+    const pay =
+      Math.min(
+        amount,
+        khata.total_due
+      );
+
+
+    db.prepare(`
+      INSERT INTO khata_entries
+      (
+        khata_id,
+        type,
+        amount,
+        note
+      )
+      VALUES (?, 'PAYMENT', ?, 'Customer payment')
+    `).run(
+      khata.id,
+      pay
+    );
+
+
+    db.prepare(`
+      UPDATE khata
+
+      SET
+        total_due =
+          MAX(total_due - ?, 0),
+        updated_at =
+          CURRENT_TIMESTAMP
+
+      WHERE id = ?
+
+    `).run(
+      pay,
+      khata.id
+    );
+
+
+    res.json({
+
+      message:
+        "Khata payment recorded",
+
+      paid:
+        pay
+
+    });
+
+  }
+);
+
+
+/* =====================================================
+   STORE EXPENSE
+===================================================== */
+
+app.post(
+  "/api/store/expense",
+  auth("store"),
+  (req, res) => {
+
+    const {
+      title,
+      amount
+    } = req.body;
+
+    const result =
+      db.prepare(`
+        INSERT INTO expenses
+        (
+          store_id,
+          title,
+          amount
+        )
+        VALUES (?, ?, ?)
+      `).run(
+        req.user.id,
+        title || "Expense",
+        number(amount)
+      );
+
+    res.status(201).json({
+
+      message:
+        "Expense added",
+
+      id:
+        result.lastInsertRowid
+
+    });
+
+  }
+);
+
+
+/* =====================================================
+   STORE DASHBOARD
+===================================================== */
+
+app.get(
+  "/api/store/dashboard",
+  auth("store"),
+  (req, res) => {
+
+    const sales =
+      db.prepare(`
+        SELECT
+          COALESCE(SUM(total),0) AS total_sales,
+          COUNT(*) AS total_orders
+
+        FROM orders
+
+        WHERE
+          store_id = ?
+          AND status != 'CANCELLED'
+
+      `).get(req.user.id);
+
+
+    const cash =
+      db.prepare(`
+        SELECT
+          COALESCE(SUM(total),0) AS total
+
+        FROM orders
+
+        WHERE
+          store_id = ?
+          AND payment_method IN ('CASH','COD')
+          AND status != 'CANCELLED'
+
+      `).get(req.user.id);
+
+
+    const upi =
+      db.prepare(`
+        SELECT
+          COALESCE(SUM(amount),0) AS total
+
+        FROM payments
+
+        WHERE
+          store_id = ?
+          AND status = 'VERIFIED'
+
+      `).get(req.user.id);
+
+
+    const due =
+      db.prepare(`
+        SELECT
+          COALESCE(SUM(total_due),0) AS total
+
+        FROM khata
+
+        WHERE
+          store_id = ?
+
+      `).get(req.user.id);
+
+
+    res.json({
+
+      total_sales:
+        sales.total_sales,
+
+      total_orders:
+        sales.total_orders,
+
+      total_cash:
+        cash.total,
+
+      total_upi:
+        upi.total,
+
+      total_due:
+        due.total
+
+    });
+
+  }
+);
+
+
+/* =====================================================
+   ADMIN LOGIN
+===================================================== */
+
+app.post(
+  "/api/admin/login",
+  async (req, res) => {
+
+    try {
+
+      const {
+        mobile,
+        password
+      } = req.body;
+
+      const admin =
+        db.prepare(`
+          SELECT *
+          FROM admins
+          WHERE mobile = ?
+        `).get(mobile);
+
+      if (!admin) {
+
+        return res.status(401).json({
+          message:
+            "Invalid admin credentials"
+        });
+
+      }
+
+      const valid =
+        await bcrypt.compare(
+          String(password),
+          admin.password_hash
+        );
+
+      if (!valid) {
+
+        return res.status(401).json({
+          message:
+            "Invalid admin credentials"
+        });
+
+      }
+
+      const token =
+        createToken({
+          id: admin.id,
+          role: "admin",
+          mobile: admin.mobile
+        });
+
+
+      res.json({
+
+        message:
+          "Admin login successful",
+
+        token,
+
+        admin: {
+          id: admin.id,
+          mobile: admin.mobile,
+          name: admin.name
+        }
+
+      });
+
+    } catch (error) {
+
+      res.status(500).json({
+        message: "Admin login failed"
+      });
+
+    }
+
+  }
+);
+
+
+/* =====================================================
+   ADMIN DASHBOARD
+===================================================== */
+
+app.get(
+  "/api/admin/dashboard",
+  auth("admin"),
+  (req, res) => {
+
+    const stores =
+      db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM stores
+      `).get().count;
+
+
+    const customers =
+      db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM customers
+      `).get().count;
+
+
+    const orders =
+      db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM orders
+        WHERE status != 'CANCELLED'
+      `).get().count;
+
+
+    const sales =
+      db.prepare(`
+        SELECT
+          COALESCE(SUM(total),0) AS total
+        FROM orders
+        WHERE status != 'CANCELLED'
+      `).get().total;
+
+
+    const rent =
+      db.prepare(`
+        SELECT
+          COALESCE(SUM(amount),0) AS total
+        FROM rent_payments
+        WHERE status = 'APPROVED'
+      `).get().total;
+
+
+    res.json({
+
+      dashboard: {
+
+        total_stores:
+          stores,
+
+        total_customers:
+          customers,
+
+        total_orders:
+          orders,
+
+        total_sales:
+          sales,
+
+        rent_collection:
+          rent
+
+      }
+
+    });
+
+  }
+);
+
+
+/* =====================================================
+   ADMIN STORES
+===================================================== */
+
+app.get(
+  "/api/admin/stores",
+  auth("admin"),
+  (req, res) => {
+
+    const stores =
+      db.prepare(`
+        SELECT
+          id,
+          store_id,
+          store_name,
+          owner_name,
+          mobile,
+          email,
+          upi_id,
+          logo,
+          status,
+          approved,
+          blocked,
+          expiry_date,
+          created_at
+        FROM stores
+        ORDER BY id DESC
+      `).all();
+
+    res.json({
+      stores
+    });
+
+  }
+);
+
+
+/* =====================================================
+   ADMIN APPROVE STORE
+===================================================== */
+
+app.post(
+  "/api/admin/store/:id/approve",
+  auth("admin"),
+  (req, res) => {
+
+    const result =
+      db.prepare(`
+        UPDATE stores
+        SET approved = 1
+        WHERE id = ?
+      `).run(
+        req.params.id
+      );
+
+    if (!result.changes) {
+
+      return res.status(404).json({
+        message: "Store not found"
+      });
+
+    }
+
+    res.json({
+      message:
+        "Store approved successfully"
+    });
+
+  }
+);
+
+
+/* =====================================================
+   ADMIN BLOCK STORE
+===================================================== */
+
+app.post(
+  "/api/admin/store/:id/block",
+  auth("admin"),
+  (req, res) => {
+
+    const blocked =
+      req.body.blocked
+        ? 1
+        : 0;
+
+    const result =
+      db.prepare(`
+        UPDATE stores
+
+        SET blocked = ?
+
+        WHERE id = ?
+
+      `).run(
+        blocked,
+        req.params.id
+      );
+
+
+    if (!result.changes) {
+
+      return res.status(404).json({
+        message: "Store not found"
+      });
+
+    }
+
+
+    res.json({
+
+      message:
+        blocked
+          ? "Store blocked"
+          : "Store unblocked"
+
+    });
+
+  }
+);
+
+
+/* =====================================================
+   ADMIN CUSTOMERS
+===================================================== */
+
+app.get(
+  "/api/admin/customers",
+  auth("admin"),
+  (req, res) => {
+
+    const customers =
+      db.prepare(`
+        SELECT
+          id,
+          mobile,
+          name,
+          blocked,
+          created_at
+        FROM customers
+        ORDER BY id DESC
+      `).all();
+
+    res.json({
+      customers
+    });
+
+  }
+);
+
+
+/* =====================================================
+   ADMIN BLOCK CUSTOMER
+===================================================== */
+
+app.post(
+  "/api/admin/customer/:id/block",
+  auth("admin"),
+  (req, res) => {
+
+    const blocked =
+      req.body.blocked
+        ? 1
+        : 0;
+
+    db.prepare(`
+      UPDATE customers
+
+      SET blocked = ?
+
+      WHERE id = ?
+
+    `).run(
+      blocked,
+      req.params.id
+    );
+
+
+    res.json({
+
+      message:
+        blocked
+          ? "Customer blocked"
+          : "Customer unblocked"
+
+    });
+
+  }
+);
+
+
+/* =====================================================
+   ADMIN ORDERS
+===================================================== */
+
+app.get(
+  "/api/admin/orders",
+  auth("admin"),
+  (req, res) => {
+
+    const orders =
+      db.prepare(`
+        SELECT
+
+          o.*,
+
+          s.store_name,
+
+          s.store_id,
+
+          c.name AS customer_name,
+
+          c.mobile AS customer_mobile
+
+        FROM orders o
+
+        JOIN stores s
+          ON s.id = o.store_id
+
+        JOIN customers c
+          ON c.id = o.customer_id
+
+        ORDER BY o.id DESC
+
+      `).all();
+
+
+    res.json({
+      orders
+    });
+
+  }
+);
+
+
+/* =====================================================
+   ADMIN PAYMENTS
+===================================================== */
+
+app.get(
+  "/api/admin/payments",
+  auth("admin"),
+  (req, res) => {
+
+    const payments =
+      db.prepare(`
+        SELECT
+          p.*,
+          s.store_name
+
+        FROM payments p
+
+        LEFT JOIN stores s
+          ON s.id = p.store_id
+
+        ORDER BY p.id DESC
+
+      `).all();
+
+
+    res.json({
+      payments
+    });
+
+  }
+);
+
+
+/* =====================================================
+   STORE RENT SUBMIT
+===================================================== */
+
+app.post(
+  "/api/store/rent",
+  auth("store"),
+  upload.single("screenshot"),
+  (req, res) => {
+
+    const amount =
+      number(req.body.amount);
+
+    if (amount <= 0) {
+
+      return res.status(400).json({
+        message: "Invalid rent amount"
+      });
+
+    }
+
+
+    let screenshot = null;
+
+    if (req.file) {
+
+      screenshot =
+        `/uploads/rent/${req.file.filename}`;
+
+    }
+
+
+    const result =
+      db.prepare(`
+        INSERT INTO rent_payments
+        (
+          store_id,
+          amount,
+          screenshot
+        )
+        VALUES (?, ?, ?)
+      `).run(
+        req.user.id,
+        amount,
+        screenshot
+      );
+
+
+    res.status(201).json({
+
+      message:
+        "Rent payment submitted",
+
+      id:
+        result.lastInsertRowid,
+
+      status:
+        "PENDING"
+
+    });
+
+  }
+);
+
+
+/* =====================================================
+   ADMIN RENT LIST
+===================================================== */
+
+app.get(
+  "/api/admin/rent",
+  auth("admin"),
+  (req, res) => {
+
+    const rent =
+      db.prepare(`
+        SELECT
+
+          r.*,
+
+          s.store_name,
+
+          s.store_id
+
+        FROM rent_payments r
+
+        JOIN stores s
+          ON s.id = r.store_id
+
+        ORDER BY r.id DESC
+
+      `).all();
+
+
+    res.json({
+      rent
+    });
+
+  }
+);
+
+
+/* =====================================================
+   ADMIN APPROVE RENT
+===================================================== */
+
+app.post(
+  "/api/admin/rent/:id/approve",
+  auth("admin"),
+  (req, res) => {
+
+    const rent =
+      db.prepare(`
+        SELECT *
+        FROM rent_payments
+        WHERE id = ?
+      `).get(req.params.id);
+
+
+    if (!rent) {
+
+      return res.status(404).json({
+        message: "Rent payment not found"
+      });
+
+    }
+
+
+    const expiry =
+      req.body.expiry_date ||
+      new Date(
+        Date.now() +
+        30 * 24 * 60 * 60 * 1000
+      )
+        .toISOString()
+        .slice(0, 10);
+
+
+    db.prepare(`
+      UPDATE rent_payments
+
+      SET
+        status = 'APPROVED',
+        expiry_date = ?
+
+      WHERE id = ?
+
+    `).run(
+      expiry,
+      rent.id
+    );
+
+
+    db.prepare(`
+      UPDATE stores
+
+      SET expiry_date = ?
+
+      WHERE id = ?
+
+    `).run(
+      expiry,
+      rent.store_id
+    );
+
+
+    res.json({
+
+      message:
+        "Rent approved",
+
+      expiry_date:
+        expiry
+
+    });
+
+  }
+);
+
+
+/* =====================================================
+   ADMIN PASSWORD
+===================================================== */
+
+app.post(
+  "/api/admin/password",
+  auth("admin"),
+  async (req, res) => {
+
+    const {
+      old_password,
+      new_password
+    } = req.body;
+
+
+    if (
+      !old_password ||
+      !new_password
+    ) {
+
+      return res.status(400).json({
+        message:
+          "Old and new password required"
+      });
+
+    }
+
+
+    const admin =
+      db.prepare(`
+        SELECT *
+        FROM admins
+        WHERE id = ?
+      `).get(req.user.id);
+
+
+    const valid =
+      await bcrypt.compare(
+        old_password,
+        admin.password_hash
+      );
+
+
+    if (!valid) {
+
+      return res.status(401).json({
+        message:
+          "Current password incorrect"
+      });
+
+    }
+
+
+    const hash =
+      await bcrypt.hash(
+        new_password,
+        12
+      );
+
+
+    db.prepare(`
+      UPDATE admins
+
+      SET password_hash = ?
+
+      WHERE id = ?
+
+    `).run(
+      hash,
+      admin.id
+    );
+
+
+    res.json({
+      message:
+        "Password updated successfully"
+    });
+
+  }
+);
+
+
+/* =====================================================
+   STORE SALES REPORT
+===================================================== */
+
+app.get(
+  "/api/store/reports",
+  auth("store"),
+  (req, res) => {
+
+    const sales =
+      db.prepare(`
+        SELECT
+
+          COUNT(*) AS orders,
+
+          COALESCE(
+            SUM(total), 0
+          ) AS sales
+
+        FROM orders
+
+        WHERE
+          store_id = ?
+          AND status != 'CANCELLED'
+
+      `).get(req.user.id);
+
+
+    const expenses =
+      db.prepare(`
+        SELECT
+
+          COALESCE(
+            SUM(amount),0
+          ) AS total
+
+        FROM expenses
+
+        WHERE store_id = ?
+
+      `).get(req.user.id);
+
+
+    res.json({
+
+      sales:
+        sales.sales,
+
+      orders:
+        sales.orders,
+
+      expenses:
+        expenses.total,
+
+      net:
+        sales.sales -
+        expenses.total
+
+    });
+
+  }
+);
+
+
+/* =====================================================
+   404
+===================================================== */
+
+app.use(
+  (req, res) => {
+
+    res.status(404).json({
+
+      message:
+        "API endpoint not found",
+
+      path:
+        req.originalUrl
+
+    });
+
+  }
+);
+
+
+/* =====================================================
+   ERROR HANDLER
+===================================================== */
+
+app.use(
+  (error, req, res, next) => {
+
+    console.error(error);
+
+    res.status(500).json({
+
+      message:
+        "Internal server error"
+
+    });
+
+  }
+);
+
+
+/* =====================================================
+   START SERVER
+===================================================== */
+
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+
+    console.log(
+      `Local Store Backend running on port ${PORT}`
+    );
+
+    console.log(
+      `http://localhost:${PORT}`
+    );
+
+  }
+);
